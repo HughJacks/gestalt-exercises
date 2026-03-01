@@ -1,8 +1,8 @@
 :root {
   --canvas-bg: #fff;
-  --canvas-border: #2c2c2c;
-  --text: #1a1a1a;
-  --accent: #1a1a1a;
+  --canvas-border: transparent;
+  --text: #000;
+  --accent: #000;
 }
 
 * {
@@ -18,21 +18,24 @@ body {
 }
 
 #app {
-  min-height: 100vh;
+  min-height: 100dvh;
+  height: 100dvh;
+  width: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 1.5rem;
+  padding: clamp(0.5rem, 2vh, 1rem);
+  overflow: hidden;
 }
 
 /* Start screen */
 .start-screen {
-  font-size: 2.5rem;
+  font-size: clamp(1.8rem, 8vw, 2.5rem);
   font-weight: 600;
   letter-spacing: 0.05em;
   cursor: pointer;
-  padding: 1rem 2rem;
+  padding: clamp(0.5rem, 2vh, 1rem) clamp(1rem, 4vw, 2rem);
   outline: none;
 }
 
@@ -46,42 +49,50 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 1.5rem;
+  gap: clamp(0.5rem, 2vh, 1rem);
   text-align: center;
   width: 100%;
-  max-width: 90vmin;
+  max-width: min(96vw, 1200px);
+  max-height: 100%;
 }
 
 .end-title {
-  font-size: 1.25rem;
+  font-size: clamp(1rem, 3vw, 1.25rem);
   font-weight: 600;
-  margin: 0 0 0.5rem 0;
+  margin: 0;
   letter-spacing: 0.02em;
 }
 
 .result-list {
   display: flex;
-  flex-direction: column;
-  gap: 1.5rem;
+  flex-direction: row;
+  justify-content: center;
+  gap: clamp(0.4rem, 1.2vw, 0.75rem);
   width: 100%;
+  flex-wrap: nowrap;
 }
 
 .result-item {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.35rem;
+  width: 16vw;
+  max-width: 140px;
+  min-width: 48px;
 }
 
 .result-word {
-  font-size: 1.25rem;
+  font-size: clamp(0.65rem, 1.9vw, 1rem);
   font-weight: 600;
   letter-spacing: 0.02em;
+  line-height: 1.1;
+  text-wrap: balance;
 }
 
 .result-canvas {
-  max-width: min(70vmin, 320px);
   width: 100%;
+  max-width: 100%;
 }
 
 .square-result {
@@ -90,15 +101,18 @@ body {
 }
 
 .play-again-btn {
-  margin-top: 1rem;
-  padding: 0.6rem 1.25rem;
-  font-size: 1rem;
+  margin-top: clamp(0.25rem, 1vh, 0.6rem);
+  padding: 0.45rem 0.9rem;
+  font-size: clamp(0.85rem, 2.5vw, 1rem);
   font-family: inherit;
-  background: var(--accent);
-  color: white;
-  border: none;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
   border-radius: 4px;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
 }
 
 .play-again-btn:hover {
@@ -111,24 +125,32 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 1.5rem;
+  gap: clamp(0.5rem, 2vh, 1rem);
   width: 100%;
-  max-width: 90vmin;
-  position: relative;
+  max-width: min(96vw, 96vmin);
+  max-height: 100%;
+}
+
+.word-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(0.15rem, 0.7vh, 0.35rem);
 }
 
 .timer {
-  position: absolute;
-  top: 0;
-  right: 0;
-  font-size: 1rem;
+  font-size: clamp(0.85rem, 2.5vw, 1rem);
   font-variant-numeric: tabular-nums;
-  color: #666;
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
 }
 
 .word-display {
   text-align: center;
-  font-size: 1.75rem;
+  font-size: clamp(1.1rem, 4vw, 1.75rem);
   font-weight: 600;
   letter-spacing: 0.02em;
   margin: 0;
@@ -136,9 +158,10 @@ body {
 
 .canvas-wrap {
   aspect-ratio: 1;
-  width: 100%;
-  max-width: min(80vmin, 480px);
-  background-color: white;
+  width: min(100%, calc(100dvh - 9rem), calc(100vw - 2rem));
+  max-width: 88vmin;
+  background-color: var(--canvas-bg);
+  border: 1px solid #000;
   position: relative;
   overflow: hidden;
   touch-action: none;
@@ -146,12 +169,7 @@ body {
 
 /* Corner brackets: two lines forming an L at each corner */
 .canvas-wrap .corner {
-  position: absolute;
-  width: 24px;
-  height: 24px;
-  pointer-events: none;
-  box-sizing: border-box;
-  z-index: 2;
+  display: none;
 }
 
 .canvas-wrap .corner-tl {
@@ -195,10 +213,85 @@ body {
   cursor: move;
   transform-origin: center center;
   touch-action: none;
+  outline: none;
 }
 
-.square.square-delete-hover {
-  opacity: 0.4;
+.square:focus,
+.square:focus-visible {
+  outline: none;
+}
+
+.square.square-dragging {
+  cursor: grabbing;
+}
+
+.square.square-copy-ready {
+  cursor: copy;
+}
+
+.square.square-copy-ready.square-dragging {
+  cursor: copy;
+}
+
+.square.square-selected {
+  outline: 1px dashed rgba(255, 255, 255, 0.55);
+  outline-offset: -1px;
+}
+
+.selection-overlay {
+  position: absolute;
+  pointer-events: none;
+  border: 1px solid #0a84ff;
+  transform-origin: center center;
+  z-index: 10;
+}
+
+.transform-handle {
+  position: absolute;
+  left: calc((var(--hx) + 1) * 50%);
+  top: calc((var(--hy) + 1) * 50%);
+  width: 11px;
+  height: 11px;
+  pointer-events: auto;
+  transform: translate(-50%, -50%);
+  border: 1px solid #0a84ff;
+  background: #fff;
+  display: grid;
+  place-items: center;
+}
+
+.resize-handle {
+  cursor: none;
+  z-index: 2;
+}
+
+.resize-handle.resize-alt {
+  cursor: none;
+}
+
+.resize-handle :global(svg) {
+  stroke-width: 2.1;
+  transform: rotate(calc((var(--hx) * 45deg) + (var(--hy) * 45deg)));
+  pointer-events: none;
+}
+
+.rotate-handle {
+  width: 34px;
+  height: 34px;
+  border: none;
+  background: transparent;
+  transform: translate(-50%, -50%) translate(calc(var(--hx) * 24px), calc(var(--hy) * 24px));
+  cursor: none;
+  z-index: 1;
+}
+
+.rotate-handle:active {
+  cursor: none;
+}
+
+.rotate-handle :global(svg) {
+  stroke-width: 2.1;
+  pointer-events: none;
 }
 
 .center-marker {
@@ -220,12 +313,40 @@ body {
 
 .square-preview {
   pointer-events: none;
-  background: rgba(0, 0, 0, 0.4);
+  background: transparent;
+  border: 2px solid #0a84ff;
   cursor: crosshair;
 }
 
 .skip-hint {
-  font-size: 0.8rem;
-  color: #666;
+  font-size: clamp(0.7rem, 2vw, 0.8rem);
+  color: var(--text);
   margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.cursor-tool-icon {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid rgba(10, 132, 255, 0.8);
+  background: rgba(255, 255, 255, 0.95);
+  color: #0a84ff;
+}
+
+.cursor-tool-icon :global(svg) {
+  stroke-width: 2.2;
+}
+
+.canvas.tool-cursor-active,
+.canvas.tool-cursor-active * {
+  cursor: none !important;
 }
