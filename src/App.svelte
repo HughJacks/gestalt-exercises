@@ -1,6 +1,7 @@
 <script>
-  import { onMount } from 'svelte';
+  import { tick } from 'svelte';
   import { MoveDiagonal2, RotateCcw, RotateCw, SkipForward, Timer } from 'lucide-svelte';
+  import gsap from 'gsap';
   import './app.css';
 
   const WORDS = [
@@ -43,6 +44,7 @@
   let timerId = null;
 
   let canvasWrap = null;
+  let borderSquareRef = null;
   let mouseCanvasX = 50;
   let mouseCanvasY = 50;
   let creationState = null; // { pointerId, startX, startY, currentX, currentY }
@@ -288,6 +290,34 @@
     transformState = null;
     clearSelection();
     resetTimer();
+    tick().then(() => {
+      if (borderSquareRef) {
+        gsap.fromTo(
+          borderSquareRef,
+          { opacity: 1, width: 1, height: 1 },
+          {
+            opacity: 1,
+            width: '100%',
+            height: '100%',
+            duration: 0.45,
+            ease: 'power2.out'
+          }
+        );
+      }
+    });
+  }
+
+  const BORDER_SHRINK_DURATION = 0.25;
+  const BORDER_GROW_DURATION = 0.35;
+
+  function animateBorderGrow() {
+    if (!borderSquareRef) return;
+    gsap.to(borderSquareRef, {
+      width: '100%',
+      height: '100%',
+      duration: BORDER_GROW_DURATION,
+      ease: 'power2.out'
+    });
   }
 
   function resetTimer() {
@@ -314,7 +344,7 @@
     }];
   }
 
-  function nextWord() {
+  function applyNextWord() {
     roundResults = [...roundResults, { word: roundWords[wordIndex], squares: squares.map(s => ({ ...s })) }];
     wordIndex += 1;
     squares = [];
@@ -330,6 +360,25 @@
     } else if (started) {
       resetTimer();
     }
+  }
+
+  function nextWord() {
+    if (!borderSquareRef) {
+      applyNextWord();
+      return;
+    }
+    gsap.to(borderSquareRef, {
+      width: 1,
+      height: 1,
+      duration: BORDER_SHRINK_DURATION,
+      ease: 'power2.in',
+      onComplete: () => {
+        applyNextWord();
+        if (!roundFinished) {
+          animateBorderGrow();
+        }
+      }
+    });
   }
 
   function playAgain() {
@@ -862,9 +911,6 @@
     if (hoverTransformMode === mode) hoverTransformMode = null;
   }
 
-  onMount(() => {
-    start();
-  });
 </script>
 
 <svelte:window
@@ -876,7 +922,31 @@
   on:blur={handleWindowBlur}
 />
 
-{#if roundFinished}
+{#if !started}
+  <div class="start-screen-wrap">
+    <h1 class="start-title">Gestalt Exercises</h1>
+    <section class="start-section">
+      <h2 class="start-heading">Controls</h2>
+      <dl class="start-controls">
+        <dt>Create a square</dt>
+        <dd>Drag on empty canvas to draw a new black square.</dd>
+
+        <dt>Duplicate</dt>
+        <dd>Hold <kbd>Alt</kbd> and drag a square (or selection) to copy it. Hold <kbd>Shift</kbd> while dragging the copy to lock movement to horizontal or vertical.</dd>
+
+        <dt>Undo / Redo</dt>
+        <dd><kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>Z</kbd> to undo, <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> to redo.</dd>
+
+        <dt>Next word</dt>
+        <dd><kbd>Space</kbd> to skip to the next word and save the current composition.</dd>
+
+      </dl>
+    </section>
+    <button class="start-btn" on:click={start}>
+      Start
+    </button>
+  </div>
+{:else if roundFinished}
   <div class="end-screen">
     <h2 class="end-title">Your words & compositions</h2>
     <div class="result-list">
@@ -921,14 +991,15 @@
       </div>
     </div>
     <div
-      class="canvas-wrap"
+      class="canvas-wrap canvas-wrap--with-corners"
       bind:this={canvasWrap}
       role="presentation"
     >
-      <div class="corner corner-tl" aria-hidden="true" />
-      <div class="corner corner-tr" aria-hidden="true" />
-      <div class="corner corner-bl" aria-hidden="true" />
-      <div class="corner corner-br" aria-hidden="true" />
+      <div
+        class="canvas-border-square"
+        bind:this={borderSquareRef}
+        aria-hidden="true"
+      />
       <div
         class="canvas"
         class:tool-cursor-active={Boolean(cursorToolIcon)}

@@ -30,17 +30,102 @@ body {
 }
 
 /* Start screen */
-.start-screen {
-  font-size: clamp(1.8rem, 8vw, 2.5rem);
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  cursor: pointer;
-  padding: clamp(0.5rem, 2vh, 1rem) clamp(1rem, 4vw, 2rem);
-  outline: none;
+.start-screen-wrap {
+  width: 100%;
+  max-width: min(92vw, 520px);
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  padding: clamp(0.5rem, 2vh, 1.5rem) 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
-.start-screen:hover {
-  opacity: 0.8;
+.start-title {
+  font-size: clamp(1.75rem, 6vw, 2.25rem);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  margin: 0 0 0.25rem 0;
+  text-align: center;
+}
+
+.start-section {
+  margin: 0;
+}
+
+.start-heading {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0 0 0.5rem 0;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+
+.start-list {
+  margin: 0;
+  padding-left: 1.25rem;
+  line-height: 1.6;
+  font-size: 0.95rem;
+  color: var(--text);
+}
+
+.start-list li {
+  margin-bottom: 0.35rem;
+}
+
+.start-controls {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.start-controls dt {
+  font-weight: 600;
+  margin: 0.75rem 0 0.2rem 0;
+  color: var(--text);
+}
+
+.start-controls dt:first-child {
+  margin-top: 0;
+}
+
+.start-controls dd {
+  margin: 0 0 0 0;
+  padding-left: 0;
+  color: #444;
+}
+
+.start-controls kbd {
+  font-family: inherit;
+  font-size: 0.85em;
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  background: #eee;
+  border: 1px solid #ccc;
+  box-shadow: 0 1px 0 #ccc;
+}
+
+.start-btn {
+  margin-top: 0.5rem;
+  padding: 0.75rem 2rem;
+  font-size: 1.1rem;
+  font-weight: 600;
+  font-family: inherit;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  align-self: center;
+}
+
+.start-btn:hover {
+  opacity: 0.9;
+}
+
+.start-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* End screen: words + saved compositions */
@@ -167,37 +252,63 @@ body {
   touch-action: none;
 }
 
-/* Corner brackets: two lines forming an L at each corner */
-.canvas-wrap .corner {
-  display: none;
+.canvas-wrap--with-corners {
+  border-color: transparent;
+  --canvas-border: #000;
 }
 
-.canvas-wrap .corner-tl {
+/* Border square: starts invisible, animates from 1×1px at center to full size on Start */
+.canvas-border-square {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 1px;
+  height: 1px;
+  transform: translate(-50%, -50%);
+  border: 2px solid var(--canvas-border);
+  background: transparent;
+  pointer-events: none;
+  z-index: 2;
+  opacity: 0;
+}
+
+/* Result canvases on end screen: static corner brackets */
+.result-canvas .corner {
+  display: block;
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  box-sizing: border-box;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.result-canvas .corner-tl {
   left: 0;
   top: 0;
-  border-left: 2px solid var(--canvas-border);
-  border-top: 2px solid var(--canvas-border);
+  border-left: 2px solid #000;
+  border-top: 2px solid #000;
 }
 
-.canvas-wrap .corner-tr {
+.result-canvas .corner-tr {
   right: 0;
   top: 0;
-  border-right: 2px solid var(--canvas-border);
-  border-top: 2px solid var(--canvas-border);
+  border-right: 2px solid #000;
+  border-top: 2px solid #000;
 }
 
-.canvas-wrap .corner-bl {
+.result-canvas .corner-bl {
   left: 0;
   bottom: 0;
-  border-left: 2px solid var(--canvas-border);
-  border-bottom: 2px solid var(--canvas-border);
+  border-left: 2px solid #000;
+  border-bottom: 2px solid #000;
 }
 
-.canvas-wrap .corner-br {
+.result-canvas .corner-br {
   right: 0;
   bottom: 0;
-  border-right: 2px solid var(--canvas-border);
-  border-bottom: 2px solid var(--canvas-border);
+  border-right: 2px solid #000;
+  border-bottom: 2px solid #000;
 }
 
 .canvas {
