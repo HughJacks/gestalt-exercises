@@ -1,10 +1,12 @@
 <script>
   import { onDestroy, onMount, tick } from 'svelte';
-  import { MoveDiagonal2, RotateCcw, RotateCw, SkipForward, Timer } from 'lucide-svelte';
   import { createClient } from '@supabase/supabase-js';
   import { UMAP } from 'umap-js';
   import gsap from 'gsap';
   import './app.css';
+  import EndScreen from './components/EndScreen.svelte';
+  import PlayScreen from './components/PlayScreen.svelte';
+  import PixelSpaceScreen from './components/PixelSpaceScreen.svelte';
 
   const WORDS = [
     'to roll',
@@ -117,6 +119,7 @@
   ];
 
   const WORDS_PER_ROUND = 5;
+  const PRE_ROUND_COUNTDOWN_SECONDS = 5;
   const MINUTES_PER_WORD = 1;
   const SECONDS_TOTAL = MINUTES_PER_WORD * 60;
   const MIN_SQUARE_SIZE = 2;
@@ -132,10 +135,17 @@
   const PIXEL_MAX_SCALE = 3.6;
   const PIXEL_SPACE_CACHE_KEY = 'gestalt-pixel-space-cache-v1';
   const PIXEL_SPACE_FETCH_LIMIT = 900;
-  const PIXEL_SPACE_CAMERA_LERP = 0.2;
+  const PIXEL_SPACE_CAMERA_LERP = 0.32;
   const PIXEL_SPACE_KEYBOARD_PAN_STEP = 44;
   const PIXEL_SPACE_INERTIA_FRICTION = 0.92;
   const PIXEL_SPACE_MIN_INERTIA_SPEED = 0.015;
+  const PIXEL_SPACE_PAN_ACTIVATION_PX = 4;
+  const PIXEL_SPACE_WHEEL_ZOOM_IN = 1.11;
+  const PIXEL_SPACE_WHEEL_ZOOM_OUT = 0.9;
+  const PIXEL_SPACE_HULL_PADDING = 16;
+  const PIXEL_SPACE_DEFAULT_VERB_WEIGHT = 0.22;
+  const PIXEL_SPACE_DEFAULT_FORM_WEIGHT = 1;
+  const PIXEL_SPACE_WORD_DISTANCE_FACTOR = 0.8;
   const CORNER_HANDLES = [
     { x: -1, y: -1, key: 'tl' },
     { x: 1, y: -1, key: 'tr' },
@@ -152,9 +162,9 @@
     return a;
   }
 
-  let started = false;
+  let started = true;
   let roundFinished = false;
-  let roundWords = [];
+  let roundWords = [getRandomWord()];
   let roundResults = []; // { word, squares } for each word when round ends
   let wordIndex = 0;
   let squares = [];
@@ -162,7 +172,10 @@
   let historyPast = [];
   let historyFuture = [];
   let timeLeft = SECONDS_TOTAL;
+  let timerSeconds = SECONDS_TOTAL;
   let timerId = null;
+  let preRoundCountdown = 0;
+  let preRoundCountdownId = null;
   let gameMode = 'timed'; // 'timed' | 'free'
 
   let canvasWrap = null;
@@ -179,9 +192,7 @@
   let copiedSquares = [];
   let pasteCount = 0;
   let username = '';
-  let submitStatus = '';
-  let submitBusy = false;
-  let showPixelSpace = false;
+  let showPixelSpace = true;
   let pixelSpaceWrap = null;
   let pixelSpaceDrawings = [];
   let pixelSpaceLoading = false;
@@ -196,10 +207,47 @@
   let pixelSpaceLastLoadedAt = '';
   let pixelSpaceLoadedFromCache = false;
   let pixelSpaceStatus = '';
+  let pixelSpaceHoveredDrawing = null;
+  let pixelSpaceTooltipX = 0;
+  let pixelSpaceTooltipY = 0;
+  let pixelSpaceDimWord = null;
+  let pixelSpaceHoverFilterTimer = null;
+  let pixelSpaceIgnoreNextBackgroundClick = false;
+  let pixelSpaceDrawPanel = false;
+  let pixelSpaceVerbWeight = PIXEL_SPACE_DEFAULT_VERB_WEIGHT;
+  let pixelSpaceFormWeight = PIXEL_SPACE_DEFAULT_FORM_WEIGHT;
+  let pixelSpacePreviousVerbWeight = pixelSpaceVerbWeight;
+  let pixelSpacePreviousFormWeight = pixelSpaceFormWeight;
 
-  $: currentWord = roundWords[wordIndex] ?? '';
+  $: currentWord = gameMode === 'timed' && preRoundCountdown > 0
+    ? `starting in ${preRoundCountdown}`
+    : (roundWords[wordIndex] ?? '');
+  $: pixelSpaceVerbWeight = Math.max(0, Math.min(1, Number(pixelSpaceVerbWeight) || 0));
+  $: pixelSpaceFormWeight = Math.max(0, Math.min(1, Number(pixelSpaceFormWeight) || 0));
+  $: if (showPixelSpace && pixelSpaceDrawPanel && currentWord && pixelSpaceDimWord !== currentWord) {
+    pixelSpaceDimWord = currentWord;
+  }
   $: pixelSpaceTransform = `translate(${pixelSpaceCamera.x}px, ${pixelSpaceCamera.y}px) scale(${pixelSpaceCamera.scale})`;
   $: pixelSpaceSelectedDrawing = pixelSpaceDrawings.find((drawing) => drawing.id === pixelSpaceSelectedDrawingId) ?? null;
+  $: pixelSpaceFocusedDrawings = pixelSpaceDimWord === null
+    ? []
+    : pixelSpaceDrawings.filter((drawing) => (drawing.word ?? '') === pixelSpaceDimWord);
+  $: pixelSpaceHull = buildPixelSpaceHull(pixelSpaceFocusedDrawings);
+  $: if (
+    pixelSpaceDrawings.length > 0 &&
+    (
+      pixelSpaceVerbWeight !== pixelSpacePreviousVerbWeight ||
+      pixelSpaceFormWeight !== pixelSpacePreviousFormWeight
+    )
+  ) {
+    pixelSpacePreviousVerbWeight = pixelSpaceVerbWeight;
+    pixelSpacePreviousFormWeight = pixelSpaceFormWeight;
+    const entries = pixelSpaceDrawings.map((drawing) => ({ ...drawing, worldX: 0, worldY: 0 }));
+    const { drawings } = layoutEmbeddedDrawings(entries);
+    pixelSpaceDrawings = drawings;
+    cachePixelSpaceDrawings(drawings);
+    loadPixelSpaceDrawings();
+  }
 
   onMount(() => {
     if (typeof window === 'undefined') return;
@@ -207,12 +255,16 @@
     if (savedUsername) {
       username = savedUsername;
     }
+    openPixelSpace();
   });
 
   onDestroy(() => {
     stopPixelSpaceCameraAnimation();
     stopPixelSpaceInertia();
     unsubscribeFromPixelSpaceRealtime();
+    clearPixelSpaceHoverFilterTimer();
+    if (timerId) clearInterval(timerId);
+    if (preRoundCountdownId) clearInterval(preRoundCountdownId);
   });
 
   function getRectangleFromDrag(startX, startY, currentX, currentY) {
@@ -379,7 +431,7 @@
     const start = Math.min(anchorIndex, targetIndex);
     const end = Math.max(anchorIndex, targetIndex);
     const rangeIds = squares.slice(start, end + 1).map((square) => square.id);
-    selectedSquareIds = Array.from(new Set([...selectedSquareIds, ...rangeIds]));
+    selectedSquareIds = rangeIds;
   }
 
   function deleteSelectedSquares() {
@@ -494,6 +546,10 @@
     return [...embedding, ...Array.from({ length: dimensions - embedding.length }, () => 0)];
   }
 
+  function normalizeWordKey(word) {
+    return String(word ?? '').trim().toLowerCase();
+  }
+
   function normalizeCoordinates(pairs, targetRadius) {
     if (pairs.length === 0) return [];
     const xs = pairs.map((pair) => pair[0]);
@@ -526,7 +582,21 @@
     }
 
     const dimensions = Math.max(...items.map((item) => item.embedding.length), 1);
-    const vectors = items.map((item) => padEmbedding(item.embedding, dimensions));
+    const wordKeys = items.map((item) => normalizeWordKey(item.word));
+    const uniqueWordKeys = Array.from(new Set(wordKeys.filter((wordKey) => wordKey.length > 0)));
+    const wordIndexByKey = new Map(uniqueWordKeys.map((wordKey, index) => [wordKey, index]));
+    const vectors = items.map((item, index) => {
+      const baseVector = padEmbedding(item.embedding, dimensions).map(
+        (value) => value * pixelSpaceFormWeight
+      );
+      if (uniqueWordKeys.length === 0) return baseVector;
+      const wordBiasVector = Array.from({ length: uniqueWordKeys.length }, () => 0);
+      const wordIndex = wordIndexByKey.get(wordKeys[index]);
+      if (wordIndex !== undefined) {
+        wordBiasVector[wordIndex] = pixelSpaceVerbWeight;
+      }
+      return [...baseVector, ...wordBiasVector];
+    });
     let projected = vectors.map((vector) => [vector[0] ?? 0, vector[1] ?? 0]);
 
     if (vectors.length >= 3) {
@@ -587,6 +657,7 @@
 
   function openPixelSpace() {
     showPixelSpace = true;
+    pixelSpaceDrawPanel = false;
     tick().then(() => {
       centerPixelSpaceCamera();
       subscribeToPixelSpaceRealtime();
@@ -598,10 +669,27 @@
 
   function closePixelSpace() {
     showPixelSpace = false;
+    pixelSpaceDrawPanel = false;
     pixelSpacePanState = null;
     stopPixelSpaceInertia();
     unsubscribeFromPixelSpaceRealtime();
     pixelSpaceStatus = '';
+    clearPixelSpaceHoverFilterTimer();
+    pixelSpaceHoveredDrawing = null;
+  }
+
+  function startInlineDraw(mode = 'timed') {
+    start(mode, { keepPixelSpace: true });
+  }
+
+  function closeInlineDrawPanel() {
+    pixelSpaceDrawPanel = false;
+    pixelSpaceDimWord = null;
+    pixelSpaceSelectedDrawingId = null;
+    creationState = null;
+    dragState = null;
+    transformState = null;
+    clearSelection();
   }
 
   function clampPixelScale(scale) {
@@ -719,20 +807,28 @@
     startPixelSpaceCameraAnimation();
   }
 
-  function applyPixelSpaceZoomAtClientPoint(clientX, clientY, zoomFactor) {
+  function applyPixelSpaceZoomAtClientPoint(clientX, clientY, zoomFactor, options = {}) {
     if (!pixelSpaceWrap) return;
     const rect = pixelSpaceWrap.getBoundingClientRect();
     const pointerX = clientX - rect.left;
     const pointerY = clientY - rect.top;
-    const targetScale = clampPixelScale(pixelSpaceCamera.scale * zoomFactor);
-    if (Math.abs(targetScale - pixelSpaceCamera.scale) < 0.00001) return;
-    const worldX = (pointerX - pixelSpaceCamera.x) / pixelSpaceCamera.scale;
-    const worldY = (pointerY - pixelSpaceCamera.y) / pixelSpaceCamera.scale;
-    setPixelSpaceCamera({
+    const shouldAnimate = Boolean(options.animate);
+    const sourceCamera = shouldAnimate ? pixelSpaceCameraTarget : pixelSpaceCamera;
+    const targetScale = clampPixelScale(sourceCamera.scale * zoomFactor);
+    if (Math.abs(targetScale - sourceCamera.scale) < 0.00001) return;
+    const worldX = (pointerX - sourceCamera.x) / sourceCamera.scale;
+    const worldY = (pointerY - sourceCamera.y) / sourceCamera.scale;
+    const nextCamera = {
       x: pointerX - worldX * targetScale,
       y: pointerY - worldY * targetScale,
       scale: targetScale
-    }, { syncTarget: true });
+    };
+    if (shouldAnimate) {
+      pixelSpaceCameraTarget = nextCamera;
+      startPixelSpaceCameraAnimation();
+      return;
+    }
+    setPixelSpaceCamera(nextCamera, { syncTarget: true });
   }
 
   function cachePixelSpaceDrawings(drawings) {
@@ -768,6 +864,7 @@
     if (pixelSpaceDrawings.length === 0) {
       return { ...baseDrawing, worldX: 0, worldY: 0 };
     }
+    const baseWordKey = normalizeWordKey(baseDrawing.word);
     const neighbor = pixelSpaceDrawings.reduce((best, drawing) => {
       const length = Math.max(baseDrawing.embedding.length, drawing.embedding.length, 1);
       const a = padEmbedding(baseDrawing.embedding, length);
@@ -776,6 +873,10 @@
       for (let i = 0; i < length; i += 1) {
         const diff = a[i] - b[i];
         distance += diff * diff;
+      }
+      const sameWord = baseWordKey.length > 0 && baseWordKey === normalizeWordKey(drawing.word);
+      if (sameWord) {
+        distance *= PIXEL_SPACE_WORD_DISTANCE_FACTOR;
       }
       if (!best || distance < best.distance) {
         return { distance, drawing };
@@ -891,53 +992,55 @@
   function ensureUsername() {
     const trimmed = username.trim();
     if (trimmed) return trimmed;
-    if (typeof window === 'undefined') return '';
-    const prompted = window.prompt('Enter a username for submissions (1-40 chars):', '') ?? '';
-    const cleaned = prompted.trim().slice(0, 40);
-    if (!cleaned) return '';
-    username = cleaned;
-    window.localStorage.setItem('gestalt-username', cleaned);
-    return cleaned;
+    return '';
   }
 
-  async function submitCurrentDrawing() {
-    submitStatus = '';
-    if (squares.length === 0) {
-      submitStatus = 'Draw something first.';
+  function updateUsername(nextValue) {
+    username = String(nextValue ?? '').slice(0, 40);
+    if (typeof window === 'undefined') return;
+    const trimmed = username.trim();
+    if (!trimmed) {
+      window.localStorage.removeItem('gestalt-username');
       return;
     }
-    if (!supabase) {
-      submitStatus = 'Supabase env vars are missing.';
-      return;
-    }
-    const ensuredUsername = ensureUsername();
-    if (!ensuredUsername) {
-      submitStatus = 'Submission cancelled (missing username).';
-      return;
-    }
-    submitBusy = true;
+    window.localStorage.setItem('gestalt-username', trimmed);
+  }
+
+  async function autoSubmitCurrentDrawing() {
+    if (squares.length === 0 || !supabase) return;
+    const savedUsername = typeof window !== 'undefined'
+      ? window.localStorage.getItem('gestalt-username')
+      : null;
+    if (!savedUsername) return;
     const drawingSquares = normalizeStoredSquares(squares);
-    const drawingPayload = {
-      squares: drawingSquares,
-      source: 'gestalt-exercizes',
-      mode: gameMode
-    };
     const embedding = buildEmbedding(drawingSquares);
-    const { error } = await supabase.from('drawings').insert({
-      username: ensuredUsername,
+    await supabase.from('drawings').insert({
+      username: savedUsername,
       word: currentWord || 'Untitled',
-      drawing_json: drawingPayload,
+      drawing_json: { squares: drawingSquares, source: 'gestalt-exercizes', mode: gameMode },
       embedding
     });
-    submitBusy = false;
-    if (error) {
-      submitStatus = `Save failed: ${error.message}`;
-      return;
+    loadPixelSpaceDrawings();
+  }
+
+  function submitCurrentDrawing() {
+    if (gameMode === 'timed' && preRoundCountdown > 0) return;
+    if (squares.length > 0 && supabase) {
+      const ensuredUsername = ensureUsername();
+      if (ensuredUsername) {
+        const drawingSquares = normalizeStoredSquares(squares);
+        const embedding = buildEmbedding(drawingSquares);
+        supabase.from('drawings').insert({
+          username: ensuredUsername,
+          word: currentWord || 'Untitled',
+          drawing_json: { squares: drawingSquares, source: 'gestalt-exercizes', mode: gameMode },
+          embedding
+        }).then(() => {
+          if (showPixelSpace) loadPixelSpaceDrawings();
+        });
+      }
     }
-    submitStatus = 'Submitted to Drawing Space.';
-    if (showPixelSpace) {
-      loadPixelSpaceDrawings();
-    }
+    nextWord();
   }
 
   function handlePixelSpacePointerDown(e) {
@@ -954,15 +1057,23 @@
       lastClientY: e.clientY,
       lastTime: performance.now(),
       velocityX: 0,
-      velocityY: 0
+      velocityY: 0,
+      isActive: false
     };
-    if (typeof e.currentTarget.setPointerCapture === 'function') {
-      e.currentTarget.setPointerCapture(e.pointerId);
-    }
   }
 
   function handlePixelSpacePointerMove(e) {
     if (!pixelSpacePanState || e.pointerId !== pixelSpacePanState.pointerId) return;
+    const deltaXFromStart = e.clientX - pixelSpacePanState.startClientX;
+    const deltaYFromStart = e.clientY - pixelSpacePanState.startClientY;
+    const dragDistance = Math.hypot(deltaXFromStart, deltaYFromStart);
+    if (!pixelSpacePanState.isActive) {
+      if (dragDistance < PIXEL_SPACE_PAN_ACTIVATION_PX) return;
+      pixelSpacePanState = { ...pixelSpacePanState, isActive: true };
+      if (typeof e.currentTarget.setPointerCapture === 'function') {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      }
+    }
     const now = performance.now();
     const elapsed = Math.max(1, now - pixelSpacePanState.lastTime);
     setPixelSpaceCamera({
@@ -982,22 +1093,63 @@
 
   function handlePixelSpacePointerUp(e) {
     if (!pixelSpacePanState || e.pointerId !== pixelSpacePanState.pointerId) return;
+    if (!pixelSpacePanState.isActive) {
+      pixelSpacePanState = null;
+      return;
+    }
     const speed = Math.hypot(pixelSpacePanState.velocityX, pixelSpacePanState.velocityY);
     if (speed >= PIXEL_SPACE_MIN_INERTIA_SPEED) {
       startPixelSpaceInertia(pixelSpacePanState.velocityX, pixelSpacePanState.velocityY);
     }
+    // Prevent the click event emitted after a drag-pan from clearing focus.
+    pixelSpaceIgnoreNextBackgroundClick = true;
     pixelSpacePanState = null;
   }
 
   function handlePixelSpaceWheel(e) {
     e.preventDefault();
-    const zoomDirection = e.deltaY < 0 ? 1.12 : 0.89;
+    const zoomDirection = e.deltaY < 0 ? PIXEL_SPACE_WHEEL_ZOOM_IN : PIXEL_SPACE_WHEEL_ZOOM_OUT;
     applyPixelSpaceZoomAtClientPoint(e.clientX, e.clientY, zoomDirection);
   }
 
   function handlePixelSpaceTileClick(e, drawing) {
     e.stopPropagation();
     pixelSpaceSelectedDrawingId = drawing.id;
+    pixelSpaceDimWord = drawing.word ?? '';
+  }
+
+  function handlePixelSpaceBackgroundClick() {
+    if (pixelSpaceIgnoreNextBackgroundClick) {
+      pixelSpaceIgnoreNextBackgroundClick = false;
+      return;
+    }
+    pixelSpaceSelectedDrawingId = null;
+    pixelSpaceDimWord = null;
+  }
+
+  function clearPixelSpaceHoverFilterTimer() {
+    if (!pixelSpaceHoverFilterTimer) return;
+    clearTimeout(pixelSpaceHoverFilterTimer);
+    pixelSpaceHoverFilterTimer = null;
+  }
+
+  function handlePixelSpaceTileHoverStart(e, drawing) {
+    e.stopPropagation();
+    pixelSpaceHoveredDrawing = drawing;
+    pixelSpaceTooltipX = e.clientX;
+    pixelSpaceTooltipY = e.clientY;
+    clearPixelSpaceHoverFilterTimer();
+  }
+
+  function handlePixelSpaceTileHoverMove(e, drawing) {
+    pixelSpaceHoveredDrawing = drawing;
+    pixelSpaceTooltipX = e.clientX;
+    pixelSpaceTooltipY = e.clientY;
+  }
+
+  function handlePixelSpaceTileHoverEnd() {
+    pixelSpaceHoveredDrawing = null;
+    clearPixelSpaceHoverFilterTimer();
   }
 
   function focusSelectedPixelDrawing() {
@@ -1005,13 +1157,92 @@
     focusPixelSpaceDrawing(pixelSpaceSelectedDrawing.id);
   }
 
+  function focusPixelSpaceWord(word) {
+    const targetWord = String(word ?? '');
+    pixelSpaceDimWord = targetWord;
+    const matchingDrawings = pixelSpaceDrawings.filter((drawing) => (drawing.word ?? '') === targetWord);
+    if (matchingDrawings.length === 0) {
+      pixelSpaceSelectedDrawingId = null;
+      return;
+    }
+    const targetDrawing = matchingDrawings[0];
+    pixelSpaceSelectedDrawingId = targetDrawing.id;
+    focusPixelSpaceDrawing(targetDrawing.id, 0.95);
+  }
+
+  function crossProduct(origin, a, b) {
+    return (a.x - origin.x) * (b.y - origin.y) - (a.y - origin.y) * (b.x - origin.x);
+  }
+
+  function buildConvexHull(points) {
+    if (points.length <= 1) return [...points];
+    const sorted = [...points].sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
+    const lower = [];
+    for (const point of sorted) {
+      while (lower.length >= 2 && crossProduct(lower[lower.length - 2], lower[lower.length - 1], point) <= 0) {
+        lower.pop();
+      }
+      lower.push(point);
+    }
+    const upper = [];
+    for (let i = sorted.length - 1; i >= 0; i -= 1) {
+      const point = sorted[i];
+      while (upper.length >= 2 && crossProduct(upper[upper.length - 2], upper[upper.length - 1], point) <= 0) {
+        upper.pop();
+      }
+      upper.push(point);
+    }
+    lower.pop();
+    upper.pop();
+    return [...lower, ...upper];
+  }
+
+  function buildPixelSpaceHull(drawings) {
+    if (!drawings.length) return null;
+    const halfTile = PIXEL_TILE_SIZE / 2;
+    const paddedHalfTile = halfTile + PIXEL_SPACE_HULL_PADDING;
+    const points = [];
+    for (const drawing of drawings) {
+      points.push(
+        { x: drawing.worldX - paddedHalfTile, y: drawing.worldY - paddedHalfTile },
+        { x: drawing.worldX + paddedHalfTile, y: drawing.worldY - paddedHalfTile },
+        { x: drawing.worldX + paddedHalfTile, y: drawing.worldY + paddedHalfTile },
+        { x: drawing.worldX - paddedHalfTile, y: drawing.worldY + paddedHalfTile }
+      );
+    }
+    const xs = points.map((point) => point.x);
+    const ys = points.map((point) => point.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const padding = PIXEL_SPACE_HULL_PADDING;
+    const hull = buildConvexHull(points);
+    if (hull.length < 3) {
+      return {
+        path: `M ${minX - padding} ${minY - padding} L ${maxX + padding} ${minY - padding} L ${maxX + padding} ${maxY + padding} L ${minX - padding} ${maxY + padding} Z`,
+        labelX: minX - padding,
+        labelY: minY - padding - 12
+      };
+    }
+    return {
+      path: `M ${hull.map((point) => `${point.x.toFixed(2)} ${point.y.toFixed(2)}`).join(' L ')} Z`,
+      labelX: Math.min(...hull.map((point) => point.x)),
+      labelY: Math.min(...hull.map((point) => point.y)) - 12
+    };
+  }
+
   function getRandomWord() {
     return WORDS[Math.floor(Math.random() * WORDS.length)];
   }
 
-  function start(mode = 'timed') {
+  const NAV_VERBS = [...WORDS];
+
+  function start(mode = 'timed', options = {}) {
+    const keepPixelSpace = Boolean(options.keepPixelSpace);
     gameMode = mode;
-    showPixelSpace = false;
+    showPixelSpace = keepPixelSpace;
+    pixelSpaceDrawPanel = keepPixelSpace;
     started = true;
     roundFinished = false;
     roundResults = [];
@@ -1024,12 +1255,15 @@
     if (gameMode === 'timed') {
       roundWords = shuffle([...WORDS]).slice(0, WORDS_PER_ROUND);
       wordIndex = 0;
-      resetTimer();
+      startPreRoundCountdown();
     } else {
       roundWords = [getRandomWord()];
       wordIndex = 0;
       if (timerId) clearInterval(timerId);
       timerId = null;
+      if (preRoundCountdownId) clearInterval(preRoundCountdownId);
+      preRoundCountdownId = null;
+      preRoundCountdown = 0;
       timeLeft = SECONDS_TOTAL;
     }
     tick().then(() => {
@@ -1070,7 +1304,23 @@
       if (timeLeft <= 0) {
         if (timerId) clearInterval(timerId);
         timerId = null;
+        autoSubmitCurrentDrawing();
         nextWord();
+      }
+    }, 1000);
+  }
+
+  function startPreRoundCountdown() {
+    if (preRoundCountdownId) clearInterval(preRoundCountdownId);
+    if (timerId) clearInterval(timerId);
+    timerId = null;
+    preRoundCountdown = PRE_ROUND_COUNTDOWN_SECONDS;
+    preRoundCountdownId = setInterval(() => {
+      preRoundCountdown -= 1;
+      if (preRoundCountdown <= 0) {
+        preRoundCountdown = 0;
+        if (preRoundCountdownId) clearInterval(preRoundCountdownId);
+        preRoundCountdownId = null;
         resetTimer();
       }
     }, 1000);
@@ -1088,6 +1338,7 @@
 
   function applyNextWord() {
     if (gameMode === 'timed') {
+      if (wordIndex >= roundWords.length) return;
       roundResults = [...roundResults, { word: roundWords[wordIndex], squares: squares.map(s => ({ ...s })) }];
       wordIndex += 1;
       squares = [];
@@ -1100,6 +1351,12 @@
         roundFinished = true;
         if (timerId) clearInterval(timerId);
         timerId = null;
+        if (preRoundCountdownId) clearInterval(preRoundCountdownId);
+        preRoundCountdownId = null;
+        preRoundCountdown = 0;
+        if (showPixelSpace && pixelSpaceDrawPanel) {
+          closeInlineDrawPanel();
+        }
       } else if (started) {
         resetTimer();
       }
@@ -1117,6 +1374,7 @@
   }
 
   function nextWord() {
+    if (gameMode === 'timed' && roundFinished) return;
     if (!borderSquareRef) {
       applyNextWord();
       return;
@@ -1150,6 +1408,7 @@
 
   function beginCreationDrag(e) {
     if (!canvasWrap || e.button !== 0) return;
+    if (gameMode === 'timed' && preRoundCountdown > 0) return;
     clearSelection();
     const { x, y } = clientToCanvasPercent(e.clientX, e.clientY);
     creationState = {
@@ -1299,7 +1558,7 @@
 
   function handleGlobalPointerMove(e) {
     if (!started || !canvasWrap) return;
-    if (showPixelSpace) return;
+    if (showPixelSpace && !pixelSpaceDrawPanel) return;
     altPressed = e.altKey;
     const rect = canvasWrap.getBoundingClientRect();
     mouseCanvasX = ((e.clientX - rect.left) / rect.width) * 100;
@@ -1583,7 +1842,8 @@
   }
 
   function handleKeydown(e) {
-    if (showPixelSpace) {
+    if (isEditableTarget(e.target)) return;
+    if (showPixelSpace && !pixelSpaceDrawPanel) {
       if (e.code === 'Escape') {
         e.preventDefault();
         closePixelSpace();
@@ -1657,6 +1917,7 @@
     }
     if (e.code === 'Space') {
       e.preventDefault();
+      if (gameMode === 'timed' && preRoundCountdown > 0) return;
       if (started) nextWord();
     }
     if ((e.key === 'Delete' || e.key === 'Backspace') && selectedSquareIds.length > 0) {
@@ -1679,6 +1940,11 @@
     altPressed = false;
   }
 
+  function isEditableTarget(target) {
+    if (!(target instanceof Element)) return false;
+    return target.matches('input, textarea, select, [contenteditable="true"]');
+  }
+
   $: draggingSquareId = dragState ? dragState.squareId : null;
   $: selectedSquares = squares.filter((s) => selectedSquareIds.includes(s.id));
   $: selectedSquare = selectedSquares.length === 1 ? selectedSquares[0] : null;
@@ -1699,7 +1965,8 @@
       rotation: 0
     };
   })();
-  $: timerDisplay = `${Math.floor(timeLeft / 60)}:${String(timeLeft % 60).padStart(2, '0')}`;
+  $: timerSeconds = gameMode === 'timed' && preRoundCountdown > 0 ? preRoundCountdown : timeLeft;
+  $: timerDisplay = `${Math.floor(timerSeconds / 60)}:${String(timerSeconds % 60).padStart(2, '0')}`;
   $: cursorToolIcon = (() => {
     if (transformState?.mode === 'resize') return 'resize';
     if (transformState?.mode === 'rotate') return 'rotate';
@@ -1727,271 +1994,96 @@
 />
 
 {#if showPixelSpace}
-  <div class="pixel-space-screen">
-    <div class="pixel-space-hud">
-      <div class="pixel-space-hud-row">
-        <button class="pixel-space-btn" on:click={closePixelSpace}>Close</button>
-        <button class="pixel-space-btn" on:click={centerPixelSpaceCamera}>Recenter</button>
-        <button class="pixel-space-btn" on:click={fitPixelSpaceToDrawings}>Fit</button>
-        <button class="pixel-space-btn" on:click={loadPixelSpaceDrawings} disabled={pixelSpaceLoading}>Reload</button>
-      </div>
-      <div class="pixel-space-meta">
-        <span>{pixelSpaceDrawings.length} drawings</span>
-        <span>Zoom {(pixelSpaceCamera.scale * 100).toFixed(0)}%</span>
-        {#if pixelSpaceLastLoadedAt}
-          <span>Synced {new Date(pixelSpaceLastLoadedAt).toLocaleTimeString()}</span>
-        {/if}
-        {#if pixelSpaceLoadedFromCache}
-          <span>Cache preview</span>
-        {/if}
-      </div>
-      {#if pixelSpaceSelectedDrawing}
-        <div class="pixel-space-selected">
-          <strong>{pixelSpaceSelectedDrawing.word || 'Untitled'}</strong>
-          <span>by {pixelSpaceSelectedDrawing.username}</span>
-          <button class="pixel-space-btn pixel-space-btn-compact" on:click={focusSelectedPixelDrawing}>Focus</button>
-        </div>
-      {/if}
-      {#if pixelSpaceStatus}
-        <p class="pixel-space-status">{pixelSpaceStatus}</p>
-      {/if}
-      {#if pixelSpaceError}
-        <p class="pixel-space-error">{pixelSpaceError}</p>
-      {/if}
-    </div>
-    <div
-      class="pixel-space-wrap"
-      bind:this={pixelSpaceWrap}
-      on:pointerdown={handlePixelSpacePointerDown}
-      on:pointermove={handlePixelSpacePointerMove}
-      on:pointerup={handlePixelSpacePointerUp}
-      on:pointercancel={handlePixelSpacePointerUp}
-      on:wheel={handlePixelSpaceWheel}
-    >
-      {#if pixelSpaceLoading && pixelSpaceDrawings.length === 0}
-        <div class="pixel-space-loading">Loading drawings...</div>
-      {/if}
-      <div class="pixel-space-world" style="transform: {pixelSpaceTransform};">
-        {#each pixelSpaceDrawings as drawing (drawing.id)}
-          <button
-            type="button"
-            class="pixel-space-tile"
-            class:pixel-space-tile-selected={pixelSpaceSelectedDrawingId === drawing.id}
-            style="transform: translate({drawing.worldX - PIXEL_TILE_SIZE / 2}px, {drawing.worldY - PIXEL_TILE_SIZE / 2}px);"
-            on:pointerdown|stopPropagation
-            on:click={(e) => handlePixelSpaceTileClick(e, drawing)}
-            aria-label={`View drawing ${drawing.word || 'Untitled'} by ${drawing.username}`}
-          >
-            <div class="pixel-space-canvas">
-              {#each drawing.squares as square (`${drawing.id}-${square.id}`)}
-                <div
-                  class="square square-result pixel-space-square"
-                  style="
-                    left: {square.x}%;
-                    top: {square.y}%;
-                    width: {square.width}%;
-                    height: {square.height}%;
-                    transform: rotate({square.rotation}deg);
-                  "
-                />
-              {/each}
-            </div>
-            <footer class="pixel-space-tile-meta">
-              <span class="pixel-space-tile-word">{drawing.word || 'Untitled'}</span>
-              <span class="pixel-space-tile-user">{drawing.username}</span>
-            </footer>
-          </button>
-        {/each}
-      </div>
-    </div>
-  </div>
-{:else if !started}
-  <div class="start-screen-wrap">
-    <h1 class="start-title">Gestalt Exercises</h1>
-    <section class="start-section">
-      <h2 class="start-heading">Controls</h2>
-      <dl class="start-controls">
-        <dt>Create a square</dt>
-        <dd>Drag on empty canvas to draw a new black square.</dd>
-
-        <dt>Drag / duplicate</dt>
-        <dd>Drag a square (or selection) to move it. Hold <kbd>Shift</kbd> while dragging to lock movement to horizontal or vertical. Hold <kbd>Alt</kbd> while dragging to copy.</dd>
-
-        <dt>Undo / Redo</dt>
-        <dd><kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>Z</kbd> to undo, <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> to redo.</dd>
-
-        <dt>Next word</dt>
-        <dd><kbd>Space</kbd> to skip to the next word and save the current composition.</dd>
-
-      </dl>
-    </section>
-    <div class="start-btn-row">
-      <button class="start-btn" on:click={() => start('timed')}>
-        Game Mode
-      </button>
-      <button class="start-btn start-btn-secondary" on:click={() => start('free')}>
-        Free Play
-      </button>
-      <button class="start-btn start-btn-secondary" on:click={openPixelSpace}>
-        Drawing Space
-      </button>
-    </div>
-  </div>
-{:else if roundFinished}
-  <div class="end-screen">
-    <h2 class="end-title">Your words & compositions</h2>
-    <div class="result-list">
-      {#each roundResults as result}
-        <div class="result-item">
-          <div class="result-word">{result.word}</div>
-          <div class="canvas-wrap result-canvas">
-            <div class="corner corner-tl" aria-hidden="true" />
-            <div class="corner corner-tr" aria-hidden="true" />
-            <div class="corner corner-bl" aria-hidden="true" />
-            <div class="corner corner-br" aria-hidden="true" />
-            <div class="canvas">
-              {#each result.squares as square (square.id)}
-                <div
-                  class="square square-result"
-                  style="
-                    left: {square.x}%;
-                    top: {square.y}%;
-                    width: {square.width}%;
-                    height: {square.height}%;
-                    transform: rotate({square.rotation}deg);
-                  "
-                />
-              {/each}
-            </div>
-          </div>
-        </div>
-      {/each}
-    </div>
-    <button class="play-again-btn" on:click={playAgain}>
-      <RotateCcw size={16} aria-hidden="true" />
-      <span>Play again</span>
-    </button>
-    <button class="play-again-btn" on:click={openPixelSpace}>
-      <span>View Drawing Space</span>
-    </button>
-  </div>
-{:else}
-  <div class="play-screen">
-    <div class="word-row">
-      <div class="word-display">{currentWord}</div>
-      {#if gameMode === 'timed'}
-        <div class="timer" aria-live="polite">
-          <Timer size={14} aria-hidden="true" />
-          <span>{timerDisplay}</span>
-        </div>
-      {/if}
-    </div>
-    <div class="play-actions">
-      <button class="play-again-btn" on:click={submitCurrentDrawing} disabled={submitBusy}>
-        {submitBusy ? 'Submitting...' : 'Submit drawing'}
-      </button>
-      <button class="play-again-btn" on:click={openPixelSpace}>
-        Drawing Space
-      </button>
-    </div>
-    {#if submitStatus}
-      <p class="submit-status">{submitStatus}</p>
-    {/if}
-    <div
-      class="canvas-wrap canvas-wrap--with-corners"
-      bind:this={canvasWrap}
-      role="presentation"
-    >
-      <div
-        class="canvas-border-square"
-        bind:this={borderSquareRef}
-        aria-hidden="true"
+  <PixelSpaceScreen
+    bind:pixelSpaceWrap
+    bind:pixelSpaceVerbWeight
+    bind:pixelSpaceFormWeight
+    {startInlineDraw}
+    {username}
+    {updateUsername}
+    verbWords={NAV_VERBS}
+    {focusPixelSpaceWord}
+    {pixelSpaceDimWord}
+    currentDrawWord={currentWord}
+    drawPanelOpen={pixelSpaceDrawPanel}
+    {handlePixelSpacePointerDown}
+    {handlePixelSpacePointerMove}
+    {handlePixelSpacePointerUp}
+    {handlePixelSpaceWheel}
+    {handlePixelSpaceBackgroundClick}
+    {pixelSpaceLoading}
+    {pixelSpaceDrawings}
+    {pixelSpaceTransform}
+    {PIXEL_TILE_SIZE}
+    {pixelSpaceSelectedDrawingId}
+    {handlePixelSpaceTileClick}
+    {handlePixelSpaceTileHoverStart}
+    {handlePixelSpaceTileHoverMove}
+    {handlePixelSpaceTileHoverEnd}
+    {pixelSpaceHull}
+    {pixelSpaceHoveredDrawing}
+    {pixelSpaceTooltipX}
+    {pixelSpaceTooltipY}
+  />
+  {#if pixelSpaceDrawPanel}
+    <div class="pixel-space-draw-panel">
+      <PlayScreen
+        bind:canvasWrap
+        bind:borderSquareRef
+        {currentWord}
+        {wordIndex}
+        wordsPerRound={WORDS_PER_ROUND}
+        {gameMode}
+        {timerDisplay}
+        {submitCurrentDrawing}
+        canCloseDrawPanel={true}
+        closeDrawPanel={closeInlineDrawPanel}
+        {cursorToolIcon}
+        {beginCreationDrag}
+        {previewSquare}
+        {squares}
+        {draggingSquareId}
+        {altPressed}
+        {selectedSquareIds}
+        {handleSquarePointerDown}
+        {selectionOverlay}
+        {CORNER_HANDLES}
+        {handleTransformHoverStart}
+        {handleTransformHoverEnd}
+        {handleResizePointerDown}
+        {handleRotatePointerDown}
+        {mouseCanvasX}
+        {mouseCanvasY}
       />
-      <div
-        class="canvas"
-        class:tool-cursor-active={Boolean(cursorToolIcon)}
-        role="application"
-        aria-label="Composition canvas; drag to create squares"
-        on:pointerdown={beginCreationDrag}
-      >
-        {#if previewSquare}
-          <div
-            class="square square-preview"
-            style="
-              left: {previewSquare.x}%;
-              top: {previewSquare.y}%;
-              width: {previewSquare.width}%;
-              height: {previewSquare.height}%;
-              transform: rotate({previewSquare.rotation}deg);
-            "
-          />
-        {/if}
-        {#each squares as square (square.id)}
-          <div
-            class="square"
-            class:square-dragging={draggingSquareId === square.id}
-            class:square-copy-ready={altPressed}
-            class:square-selected={selectedSquareIds.includes(square.id)}
-            style="
-              left: {square.x}%;
-              top: {square.y}%;
-              width: {square.width}%;
-              height: {square.height}%;
-              transform: rotate({square.rotation}deg);
-            "
-            on:pointerdown={(e) => handleSquarePointerDown(e, square)}
-          />
-        {/each}
-        {#if selectionOverlay}
-          <div
-            class="selection-overlay"
-            style="
-              left: {selectionOverlay.x}%;
-              top: {selectionOverlay.y}%;
-              width: {selectionOverlay.width}%;
-              height: {selectionOverlay.height}%;
-              transform: rotate({selectionOverlay.rotation}deg);
-            "
-          >
-            {#each CORNER_HANDLES as handle (handle.key)}
-              <div
-                class="transform-handle resize-handle"
-                class:resize-alt={(handle.x === 1 && handle.y === -1) || (handle.x === -1 && handle.y === 1)}
-                style="--hx: {handle.x}; --hy: {handle.y};"
-                on:pointerenter={() => handleTransformHoverStart('resize')}
-                on:pointerleave={() => handleTransformHoverEnd('resize')}
-                on:pointerdown={(e) => handleResizePointerDown(e, handle.x, handle.y)}
-              />
-            {/each}
-            {#each CORNER_HANDLES as handle (handle.key)}
-              <div
-                class="transform-handle rotate-handle"
-                style="--hx: {handle.x}; --hy: {handle.y};"
-                on:pointerenter={() => handleTransformHoverStart('rotate')}
-                on:pointerleave={() => handleTransformHoverEnd('rotate')}
-                on:pointerdown={handleRotatePointerDown}
-              />
-            {/each}
-          </div>
-        {/if}
-        {#if cursorToolIcon}
-          <div
-            class="cursor-tool-icon"
-            style="left: {mouseCanvasX}%; top: {mouseCanvasY}%;"
-            aria-hidden="true"
-          >
-            {#if cursorToolIcon === 'resize'}
-              <MoveDiagonal2 size={13} />
-            {:else}
-              <RotateCw size={13} />
-            {/if}
-          </div>
-        {/if}
-      </div>
     </div>
-    <p class="skip-hint">
-      <SkipForward size={12} aria-hidden="true" />
-      <span>{gameMode === 'timed' ? 'Space to skip' : 'Space for new word'}</span>
-    </p>
-  </div>
+  {/if}
+{:else if roundFinished}
+  <EndScreen {roundResults} {playAgain} {openPixelSpace} />
+{:else}
+  <PlayScreen
+    bind:canvasWrap
+    bind:borderSquareRef
+    {currentWord}
+    {wordIndex}
+    wordsPerRound={WORDS_PER_ROUND}
+    {gameMode}
+    {timerDisplay}
+    {submitCurrentDrawing}
+    {cursorToolIcon}
+    {beginCreationDrag}
+    {previewSquare}
+    {squares}
+    {draggingSquareId}
+    {altPressed}
+    {selectedSquareIds}
+    {handleSquarePointerDown}
+    {selectionOverlay}
+    {CORNER_HANDLES}
+    {handleTransformHoverStart}
+    {handleTransformHoverEnd}
+    {handleResizePointerDown}
+    {handleRotatePointerDown}
+    {mouseCanvasX}
+    {mouseCanvasY}
+  />
 {/if}
