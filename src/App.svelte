@@ -576,6 +576,41 @@
     return (hash % 1000) / 1000;
   }
 
+  function overlapsPlacedTiles(candidateX, candidateY, placedCenters, minSpacing) {
+    return placedCenters.some((center) => (
+      Math.abs(candidateX - center.x) < minSpacing &&
+      Math.abs(candidateY - center.y) < minSpacing
+    ));
+  }
+
+  function resolveClusterCollision(baseX, baseY, itemId, placedCenters, minSpacing) {
+    if (!overlapsPlacedTiles(baseX, baseY, placedCenters, minSpacing)) {
+      return { x: baseX, y: baseY };
+    }
+
+    const baseAngle = hashToUnit(`${itemId}-cluster-angle`) * Math.PI * 2;
+    const maxRings = 20;
+    const radiusStep = minSpacing * 0.42;
+    for (let ring = 1; ring <= maxRings; ring += 1) {
+      const radius = ring * radiusStep;
+      const steps = 10 + ring * 6;
+      for (let step = 0; step < steps; step += 1) {
+        const angle = baseAngle + (step / steps) * Math.PI * 2;
+        const candidateX = baseX + Math.cos(angle) * radius;
+        const candidateY = baseY + Math.sin(angle) * radius;
+        if (!overlapsPlacedTiles(candidateX, candidateY, placedCenters, minSpacing)) {
+          return { x: candidateX, y: candidateY };
+        }
+      }
+    }
+
+    const fallbackRadius = maxRings * radiusStep + minSpacing;
+    return {
+      x: baseX + Math.cos(baseAngle) * fallbackRadius,
+      y: baseY + Math.sin(baseAngle) * fallbackRadius
+    };
+  }
+
   function layoutEmbeddedDrawings(items) {
     if (items.length === 0) {
       return { drawings: [] };
@@ -617,7 +652,7 @@
 
     const targetRadius = Math.max(380, Math.sqrt(items.length) * (PIXEL_TILE_SIZE + PIXEL_TILE_GAP) * 0.9);
     const normalized = normalizeCoordinates(projected, targetRadius);
-    const drawings = items.map((item, index) => {
+    const candidateDrawings = items.map((item, index) => {
       const [baseX, baseY] = normalized[index] ?? [0, 0];
       const jitterStrength = 7;
       const jitterX = (hashToUnit(`${item.id}-x`) - 0.5) * jitterStrength;
@@ -626,6 +661,28 @@
         ...item,
         worldX: baseX + jitterX,
         worldY: baseY + jitterY
+      };
+    });
+    const minSpacing = PIXEL_TILE_SIZE + 6;
+    const placementOrder = candidateDrawings
+      .map((drawing, index) => ({ index, distance: drawing.worldX * drawing.worldX + drawing.worldY * drawing.worldY }))
+      .sort((a, b) => a.distance - b.distance);
+    const placedCenters = [];
+    const drawings = Array.from({ length: candidateDrawings.length }, () => null);
+    placementOrder.forEach(({ index }) => {
+      const drawing = candidateDrawings[index];
+      const resolved = resolveClusterCollision(
+        drawing.worldX,
+        drawing.worldY,
+        drawing.id,
+        placedCenters,
+        minSpacing
+      );
+      placedCenters.push({ x: resolved.x, y: resolved.y });
+      drawings[index] = {
+        ...drawing,
+        worldX: resolved.x,
+        worldY: resolved.y
       };
     });
     return { drawings };
